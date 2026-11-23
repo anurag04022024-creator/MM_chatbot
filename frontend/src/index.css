@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-page: #FAF9F5;
+    --bg-surface: #FFFFFF;
+    --border-color: #E8E6DC;
+    --text-primary: #1F1E1D;
+    --text-muted: #6B6A66;
+    --accent: #D97757;
+  }
+
+  .dark {
+    --bg-page: #262624;
+    --bg-surface: #30302E;
+    --border-color: #3F3E3B;
+    --text-primary: #ECEBE6;
+    --text-muted: #9C9A92;
+    --accent: #E28768;
+  }
+
+  body {
+    @apply font-sans bg-brand-bg text-brand-text dark:bg-brand-darkBg dark:text-brand-darkText min-h-screen overflow-x-hidden transition-colors duration-200;
+  }
+
+  h1, h2, h3, .font-serif-heading {
+    @apply font-serif tracking-tight font-normal text-brand-text dark:text-brand-darkText;
+  }
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(107, 106, 102, 0.25);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 106, 102, 0.45);
+}
+
+/* Prism syntax highlighting - Warm Claude palette */
+pre[class*="language-"] {
+  @apply bg-[#1F1E1D] text-[#ECEBE6] p-4 rounded-xl text-sm overflow-x-auto font-mono my-3 border border-[#383733];
+}
+code[class*="language-"], code {
+  @apply font-mono text-sm;
+}
+:not(pre) > code {
+  @apply bg-stone-100 dark:bg-stone-800 text-brand-accent px-1.5 py-0.5 rounded text-xs font-mono;
+}
+
+/* Tokens */
+.token.comment, .token.prolog, .token.doctype, .token.cdata { color: #8F8C84; font-style: italic; }
+.token.punctuation { color: #D4D2C9; }
+.token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol { color: #E58E62; }
+.token.selector, .token.attr-name, .token.string, .token.char, .token.builtin { color: #A5C08A; }
+.token.operator, .token.entity, .token.url, .language-css .token.string, .style .token.string { color: #D9A057; }
+.token.atrule, .token.attr-value, .token.keyword { color: #D97757; font-weight: 500; }
+.token.function, .token.class-name { color: #7CA8CF; }
+.token.regex, .token.important, .token.variable { color: #E8A87C; }
+
+/* Pulse animation for streaming dot */
+@keyframes pulseDot {
+  0%, 100% { opacity: 0.2; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+.animate-pulse-dot {
+  animation: pulseDot 1.2s infinite ease-in-out;
+}
+
+/* Audio waveform bar animation */
+@keyframes waveAnim {
+  0%, 100% { height: 4px; }
+  50% { height: 18px; }
+}
+.wave-bar {
+  animation: waveAnim 0.8s infinite ease-in-out;
+}
