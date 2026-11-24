@@ -13,6 +13,7 @@ export interface UserSettings {
   defaultModel: string;
   theme: ThemeMode;
   fontSize: FontSize;
+  maxTokens: number;
   webSearchDefault: boolean;
   extendedThinkingDefault: boolean;
   systemPrompt: string;
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   defaultModel: 'nova-3.5-sonnet',
   theme: 'light',
   fontSize: 'base',
+  maxTokens: 8192,
   webSearchDefault: false,
   extendedThinkingDefault: false,
   systemPrompt: 'You are NOVA, a calm, intelligent, thoughtful, and highly capable AI assistant.',

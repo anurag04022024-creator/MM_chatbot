@@ -129,6 +129,41 @@ export const SettingsModal: React.FC = () => {
 
           <div className="h-px bg-brand-border/60 dark:bg-brand-darkBorder/60" />
 
+          {/* Maximum Output Tokens (Configurable) */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-semibold text-brand-muted uppercase tracking-wider">
+                <Cpu size={14} /> Maximum Output Tokens
+              </div>
+              <span className="text-xs font-mono text-brand-accent font-medium">
+                {settings.maxTokens || 8192} tokens
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {[4096, 8192, 16384].map((tokens) => (
+                <button
+                  key={tokens}
+                  onClick={() => updateSettings({ maxTokens: tokens })}
+                  className={`flex flex-col items-center justify-center py-2 px-2.5 rounded-xl border text-xs transition-all ${
+                    (settings.maxTokens || 8192) === tokens
+                      ? 'border-brand-accent bg-brand-accentSoft dark:bg-brand-darkAccentSoft text-brand-accent font-medium'
+                      : 'border-brand-border dark:border-brand-darkBorder hover:bg-stone-100 dark:hover:bg-stone-800 text-brand-muted'
+                  }`}
+                >
+                  <span>{tokens}</span>
+                  <span className="text-[10px] opacity-75">
+                    {tokens === 4096 ? 'Standard' : tokens === 8192 ? 'Code/Long' : 'Extended'}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-brand-muted dark:text-brand-darkMuted">
+              Prevents long answers and 200+ line code programs from truncating in the middle.
+            </p>
+          </div>
+
+          <div className="h-px bg-brand-border/60 dark:bg-brand-darkBorder/60" />
+
           {/* Default Model */}
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-xs font-semibold text-brand-muted uppercase tracking-wider">

@@ -7,6 +7,7 @@ import { ImageProvider } from './providers/imageProvider.js';
 import { SearchProvider } from './providers/searchProvider.js';
 import { SpeechProvider } from './providers/speechProvider.js';
 import { executeCode } from './providers/codeSandbox.js';
+import { extractDocumentContent } from './providers/documentParser.js';
 
 dotenv.config();
 
@@ -14,10 +15,10 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '30mb' }));
-app.use(express.urlencoded({ extended: true, limit: '30mb' }));
+app.use(express.json({ limit: '60mb' }));
+app.use(express.urlencoded({ extended: true, limit: '60mb' }));
 
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
+const upload = multer({ limits: { fileSize: 50 * 1024 * 1024 } });
 
 // Providers initialization
 const llmProvider = new LLMProvider({
@@ -37,6 +38,7 @@ const searchProvider = new SearchProvider({
 
 const speechProvider = new SpeechProvider({
   geminiApiKey: process.env.GEMINI_API_KEY,
+  openaiApiKey: process.env.OPENAI_API_KEY,
 });
 
 // --- Health Check ---
@@ -55,24 +57,89 @@ app.get('/api/health', (req, res) => {
 
 // --- SSE Streaming Chat Endpoint ---
 app.post('/api/chat/stream', async (req, res) => {
-  const { messages, model, extendedThinking, webSearch } = req.body;
+  req.setTimeout(600000); // 10 minute timeout for long essay/code generation
+
+  const { messages, model, extendedThinking, webSearch, maxTokens } = req.body;
 
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: 'Messages array is required' });
   }
 
-  // Set SSE Headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  // Set SSE and Anti-Buffering Headers
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
+  // Keep-alive heartbeat interval to prevent aggressive proxy / gateway timeouts
+  const heartbeat = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 15000);
+
   try {
+    // Preprocess any documents or audio in messages that need extraction
+    for (const msg of messages) {
+      if (msg.attachments && Array.isArray(msg.attachments)) {
+        for (const att of msg.attachments) {
+          const mime = (att.mimeType || '').toLowerCase();
+          const isDoc =
+            mime.includes('pdf') ||
+            mime.includes('word') ||
+            mime.includes('document') ||
+            mime.includes('sheet') ||
+            mime.includes('excel') ||
+            mime.includes('csv') ||
+            mime.includes('text') ||
+            ['pdf', 'docx', 'xlsx', 'csv', 'txt', 'py', 'js', 'json', 'md'].some((ext) =>
+              (att.name || '').toLowerCase().endsWith(ext)
+            );
+
+          // Extract document text if buffer/base64 is available and text not yet extracted
+          if (isDoc && !att.extractedText && att.base64) {
+            try {
+              const cleanB64 = att.base64.replace(/^data:[^;]+;base64,/, '');
+              const buf = Buffer.from(cleanB64, 'base64');
+              const parsed = await extractDocumentContent({
+                buffer: buf,
+                mimeType: mime,
+                filename: att.name || 'document',
+              });
+              if (parsed.text) {
+                att.extractedText = parsed.text;
+                console.log(`[DocumentParser] Extracted ${parsed.text.length} chars from ${att.name}`);
+              }
+            } catch (pErr) {
+              console.warn(`[DocumentParser] Failed to extract text for ${att.name}:`, pErr.message);
+            }
+          }
+
+          // Transcribe audio if not yet transcribed
+          if (mime.startsWith('audio/') && !att.transcript && att.base64) {
+            try {
+              const cleanB64 = att.base64.replace(/^data:[^;]+;base64,/, '');
+              const trResult = await speechProvider.transcribe({
+                base64: cleanB64,
+                mimeType: mime,
+              });
+              if (trResult?.text) {
+                att.transcript = trResult.text;
+                console.log(`[SpeechProvider] Transcribed audio for ${att.name}: "${trResult.text.slice(0, 50)}..."`);
+              }
+            } catch (tErr) {
+              console.warn(`[SpeechProvider] Failed to transcribe ${att.name}:`, tErr.message);
+            }
+          }
+        }
+      }
+    }
+
     await llmProvider.streamChat({
       messages,
       model,
       extendedThinking,
       webSearch,
+      maxTokens: maxTokens || 8192,
       onToken: (token) => {
         res.write(`data: ${JSON.stringify({ type: 'token', token })}\n\n`);
       },
@@ -82,14 +149,76 @@ app.post('/api/chat/stream', async (req, res) => {
       onToolCall: (toolCall) => {
         res.write(`data: ${JSON.stringify({ type: 'tool_call', ...toolCall })}\n\n`);
       },
+      onFinishReason: (finishReason) => {
+        res.write(`data: ${JSON.stringify({ type: 'finish_reason', finishReason })}\n\n`);
+      },
     });
 
+    clearInterval(heartbeat);
     res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
     res.end();
   } catch (err) {
+    clearInterval(heartbeat);
     console.error('Chat streaming error:', err);
     res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
     res.end();
+  }
+});
+
+// --- Speech Transcription Endpoint ---
+app.post('/api/transcribe', upload.single('file'), async (req, res) => {
+  try {
+    let buffer = null;
+    let mimeType = 'audio/webm';
+
+    if (req.file) {
+      buffer = req.file.buffer;
+      mimeType = req.file.mimetype || mimeType;
+    } else if (req.body.audio) {
+      const cleanB64 = req.body.audio.replace(/^data:[^;]+;base64,/, '');
+      buffer = Buffer.from(cleanB64, 'base64');
+      mimeType = req.body.mimeType || mimeType;
+    }
+
+    if (!buffer) {
+      return res.status(400).json({ error: 'No audio provided' });
+    }
+
+    const result = await speechProvider.transcribe({ buffer, mimeType });
+    res.json(result);
+  } catch (err) {
+    console.error('[Transcribe API Error]:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Document Text Extraction Endpoint ---
+app.post('/api/documents/parse', upload.single('file'), async (req, res) => {
+  try {
+    let buffer = null;
+    let filename = 'document';
+    let mimeType = 'application/octet-stream';
+
+    if (req.file) {
+      buffer = req.file.buffer;
+      filename = req.file.originalname || filename;
+      mimeType = req.file.mimetype || mimeType;
+    } else if (req.body.file) {
+      const cleanB64 = req.body.file.replace(/^data:[^;]+;base64,/, '');
+      buffer = Buffer.from(cleanB64, 'base64');
+      filename = req.body.filename || filename;
+      mimeType = req.body.mimeType || mimeType;
+    }
+
+    if (!buffer) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    const result = await extractDocumentContent({ buffer, mimeType, filename });
+    res.json(result);
+  } catch (err) {
+    console.error('[Document Parse Error]:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -119,26 +248,13 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
-// --- Code Execution Endpoint ---
-app.post('/api/execute-code', async (req, res) => {
+// --- In-Browser / Server Code Execution Sandbox ---
+app.post('/api/code/execute', async (req, res) => {
   try {
-    const { language, code } = req.body;
+    const { code, language } = req.body;
     if (!code) return res.status(400).json({ error: 'Code is required' });
 
-    const result = await executeCode({ language, code });
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// --- Transcription Endpoint ---
-app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
-  try {
-    const result = await speechProvider.transcribe({
-      fileBuffer: req.file?.buffer,
-      mimeType: req.file?.mimetype,
-    });
+    const result = await executeCode({ code, language });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -7,6 +7,9 @@ export interface Attachment {
   mimeType: string;
   size: number;
   url: string; // Object URL or data URI
+  base64?: string; // Pure or data URL base64 for server delivery
+  extractedText?: string; // Text extracted from documents
+  transcript?: string; // Audio transcription
   duration?: number; // for audio in seconds
   thumbnailUrl?: string; // for image
   waveformData?: number[]; // simulated or extracted waveform
@@ -25,6 +28,7 @@ export interface Message {
   reasoning?: string; // for extended thinking
   isStreaming?: boolean;
   error?: string;
+  finishReason?: string; // e.g. 'MAX_TOKENS' or 'STOP'
   modelUsed?: string;
   webSearchUsed?: boolean;
   feedback?: 'up' | 'down';

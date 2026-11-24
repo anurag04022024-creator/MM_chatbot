@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Pencil, Check, X, ChevronDown, ChevronRight, Brain } from 'lucide-react';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import { Pencil, Check, X, ChevronDown, ChevronRight, Brain, AlertTriangle, Play, RefreshCw } from 'lucide-react';
 import { Message } from '../../types/chat';
 import { CodeBlock } from './CodeBlock';
 import { AttachmentGrid } from './AttachmentGrid';
@@ -15,7 +17,15 @@ interface MessageItemProps {
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({ message, isStreaming }) => {
-  const { editUserMessage, currentStreamingText, currentReasoningText, streamingMessageId } = useChatStore();
+  const {
+    editUserMessage,
+    currentStreamingText,
+    currentReasoningText,
+    streamingMessageId,
+    continueGenerating,
+    retryMessage,
+  } = useChatStore();
+
   const [isEditing, setIsEditing] = useState(false);
   const [editedContent, setEditedContent] = useState(message.content);
   const [isReasoningOpen, setIsReasoningOpen] = useState(true);
@@ -24,6 +34,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, isStreaming }
   const isCurrentlyStreaming = isStreaming && message.id === streamingMessageId;
   const displayContent = isCurrentlyStreaming ? currentStreamingText || message.content : message.content;
   const displayReasoning = isCurrentlyStreaming ? currentReasoningText || message.reasoning : message.reasoning;
+
+  const isCutOff =
+    !isCurrentlyStreaming &&
+    message.finishReason &&
+    ['MAX_TOKENS', 'LENGTH', 'length'].includes(message.finishReason);
 
   const handleSaveEdit = () => {
     if (!editedContent.trim()) return;
@@ -124,10 +139,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, isStreaming }
           </div>
         )}
 
-        {/* Assistant Content (rendered as plain text markdown, no bubble) */}
-        <div className="prose prose-stone dark:prose-invert max-w-none text-brand-text dark:text-brand-darkText text-[15px] leading-relaxed">
+        {/* Assistant Content (rendered as plain text markdown, no bubble, full height, no truncation) */}
+        <div className="prose prose-stone dark:prose-invert max-w-none text-brand-text dark:text-brand-darkText text-[15px] leading-relaxed break-words">
           <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[rehypeKatex]}
             components={{
               code({ node, className, children, ...props }) {
                 const match = /language-(\w+)/.exec(className || '');
@@ -152,8 +168,44 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, isStreaming }
           )}
         </div>
 
+        {/* If answer was cut off due to max output tokens, provide Continue generating button */}
+        {isCutOff && (
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              onClick={() => continueGenerating(message.id)}
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl border border-brand-accent text-brand-accent bg-brand-accentSoft/50 hover:bg-brand-accentSoft transition-all text-xs font-medium shadow-sm hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <Play size={12} className="fill-brand-accent" />
+              Continue generating
+            </button>
+            <span className="text-xs text-brand-muted dark:text-brand-darkMuted">
+              Answer reached maximum token limit
+            </span>
+          </div>
+        )}
+
+        {/* Visible Error Banner with Retry Button */}
+        {message.error && !isCurrentlyStreaming && (
+          <div className="mt-3 p-3.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/60 flex items-start justify-between gap-3 text-sm text-red-700 dark:text-red-300">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle size={18} className="shrink-0 mt-0.5 text-red-600 dark:text-red-400" />
+              <div>
+                <div className="font-medium text-xs md:text-sm">Request Unsuccessful</div>
+                <div className="text-xs text-red-600/90 dark:text-red-300/80 mt-0.5 font-mono">{message.error}</div>
+              </div>
+            </div>
+            <button
+              onClick={() => retryMessage(message.id)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors shadow-sm shrink-0"
+            >
+              <RefreshCw size={13} />
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Assistant Action Buttons */}
-        {!isCurrentlyStreaming && displayContent && (
+        {!isCurrentlyStreaming && displayContent && !message.error && (
           <ActionButtons
             messageId={message.id}
             content={displayContent}

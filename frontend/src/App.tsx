@@ -20,6 +20,8 @@ import { generateId } from './lib/utils';
 import type { Attachment } from './types/chat';
 import type { ArtifactItem } from './lib/db';
 
+import { createAttachmentFromFile } from './lib/fileProcessing';
+
 export const App: React.FC = () => {
   const { applyTheme } = useThemeStore();
   const { addAttachment, addToast } = useChatStore();
@@ -41,31 +43,22 @@ export const App: React.FC = () => {
   // Global keyboard shortcuts (⌘K, ⌘Shift+O, Esc)
   useKeyboardShortcuts();
 
-  // Global Drag-and-drop
+  // Global Drag-and-drop with full base64 encoding and multimodal pipeline
   const { isDragging } = useDragAndDrop({
-    onFilesDropped: (files) => {
-      files.forEach((file) => {
+    onFilesDropped: async (files) => {
+      for (const file of files) {
         if (file.size > 25 * 1024 * 1024) {
           addToast(`File ${file.name} exceeds 25 MB limit`, 'error');
-          return;
+          continue;
         }
 
-        let type: 'image' | 'audio' | 'document' = 'document';
-        if (file.type.startsWith('image/')) type = 'image';
-        else if (file.type.startsWith('audio/')) type = 'audio';
-
-        const url = URL.createObjectURL(file);
-        const attachment: Attachment = {
-          id: generateId(),
-          name: file.name,
-          type,
-          mimeType: file.type,
-          size: file.size,
-          url,
-          thumbnailUrl: type === 'image' ? url : undefined,
-        };
-        addAttachment(attachment);
-      });
+        try {
+          const attachment = await createAttachmentFromFile(file);
+          addAttachment(attachment);
+        } catch (err: any) {
+          addToast(`Could not process ${file.name}: ${err.message}`, 'error');
+        }
+      }
       addToast(`Attached ${files.length} file(s)`, 'success');
     },
   });

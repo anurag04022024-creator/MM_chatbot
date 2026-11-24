@@ -30,6 +30,8 @@ import { useSpeechDictation } from '../../hooks/useSpeechDictation';
 import type { Attachment } from '../../types/chat';
 import { generateId } from '../../lib/utils';
 
+import { createAttachmentFromFile, processImageFile, readFileAsBase64 } from '../../lib/fileProcessing';
+
 export const Composer: React.FC = () => {
   const {
     sendMessage,
@@ -83,19 +85,41 @@ export const Composer: React.FC = () => {
     confirmRecording,
     cancelRecording,
   } = useVoiceRecorder({
-    onRecordingComplete: (result) => {
-      const audioAttachment: Attachment = {
-        id: generateId(),
-        name: `Voice_Note_${new Date().toLocaleTimeString().replace(/:/g, '-')}.webm`,
-        type: 'audio',
-        mimeType: result.blob.type,
-        size: result.blob.size,
-        url: result.url,
-        duration: result.duration,
-        waveformData: result.waveformData,
-      };
-      addAttachment(audioAttachment);
-      addToast('Voice recording attached', 'success');
+    onRecordingComplete: async (result) => {
+      try {
+        const base64 = await readFileAsBase64(result.blob);
+        const audioAttachment: Attachment = {
+          id: generateId(),
+          name: `Voice_Note_${new Date().toLocaleTimeString().replace(/:/g, '-')}.webm`,
+          type: 'audio',
+          mimeType: result.blob.type || 'audio/webm',
+          size: result.blob.size,
+          url: result.url,
+          base64,
+          duration: result.duration,
+          waveformData: result.waveformData,
+        };
+
+        addAttachment(audioAttachment);
+        addToast('Voice recording attached. Transcribing...', 'info');
+
+        // Transcribe via backend
+        fetch('http://localhost:3001/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audio: base64, mimeType: audioAttachment.mimeType }),
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (data.text) {
+              audioAttachment.transcript = data.text;
+              addToast('Voice note transcribed successfully', 'success');
+            }
+          })
+          .catch((err) => console.warn('[Transcribe Hook Error]:', err));
+      } catch (err: any) {
+        addToast(`Could not process voice note: ${err.message}`, 'error');
+      }
     },
     onError: (err) => {
       addToast(`Microphone error: ${err.message}`, 'error');
@@ -144,8 +168,8 @@ export const Composer: React.FC = () => {
     sendMessage(text);
   };
 
-  // Clipboard image paste support
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+  // Clipboard image paste support with base64 conversion & resizing
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = e.clipboardData?.items;
     if (!items) return;
 
@@ -153,50 +177,39 @@ export const Composer: React.FC = () => {
       if (items[i].type.startsWith('image/')) {
         const file = items[i].getAsFile();
         if (file) {
-          const url = URL.createObjectURL(file);
-          addAttachment({
-            id: generateId(),
-            name: `Pasted_Image_${Date.now()}.png`,
-            type: 'image',
-            mimeType: file.type,
-            size: file.size,
-            url,
-            thumbnailUrl: url,
-          });
-          addToast('Image pasted from clipboard', 'success');
+          try {
+            const attachment = await createAttachmentFromFile(file);
+            attachment.name = `Pasted_Image_${Date.now()}.png`;
+            addAttachment(attachment);
+            addToast('Image pasted and processed from clipboard', 'success');
+          } catch (err: any) {
+            addToast(`Clipboard image error: ${err.message}`, 'error');
+          }
         }
       }
     }
   };
 
-  const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    Array.from(files).forEach((file) => {
+    const fileList = Array.from(files);
+    e.target.value = '';
+
+    for (const file of fileList) {
       if (file.size > 25 * 1024 * 1024) {
         addToast(`File ${file.name} exceeds 25 MB limit`, 'error');
-        return;
+        continue;
       }
 
-      let type: 'image' | 'audio' | 'document' = 'document';
-      if (file.type.startsWith('image/')) type = 'image';
-      else if (file.type.startsWith('audio/')) type = 'audio';
-
-      const url = URL.createObjectURL(file);
-      const attachment: Attachment = {
-        id: generateId(),
-        name: file.name,
-        type,
-        mimeType: file.type,
-        size: file.size,
-        url,
-        thumbnailUrl: type === 'image' ? url : undefined,
-      };
-      addAttachment(attachment);
-    });
-
-    e.target.value = '';
+      try {
+        const attachment = await createAttachmentFromFile(file);
+        addAttachment(attachment);
+      } catch (err: any) {
+        addToast(`Could not process ${file.name}: ${err.message}`, 'error');
+      }
+    }
   };
 
   const slashCommands = [

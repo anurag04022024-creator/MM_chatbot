@@ -1,6 +1,7 @@
 /**
  * Unified LLM Provider Adapter
- * Supports Google Gemini, Anthropic Claude, OpenAI, Ollama, and Mock/Demo
+ * Supports Google Gemini with multi-model fallback, full multimodal attachments (images, audio, PDF, DOCX, XLSX),
+ * streaming parser with line buffering, finish reason detection, and dynamic fallback.
  */
 
 const NOVA_SYSTEM_PROMPT = `You are NOVA, a highly capable, warm, and honest multimodal AI assistant. You can help with any topic: programming, math, science, writing, business, study, health information, law basics, travel, daily life, creative work, and more.
@@ -8,9 +9,13 @@ const NOVA_SYSTEM_PROMPT = `You are NOVA, a highly capable, warm, and honest mul
 BEHAVIOR:
 - Answer every question directly and helpfully. Start with the answer, then explain if needed.
 - Reply in the same language the user writes in (Hindi, Hinglish, English, etc.).
-- Match the length to the question: short for simple questions, detailed for complex ones.
+- Match the length to the question: short for simple questions, detailed for complex ones. Provide complete, in-depth responses without premature truncation.
 - If a request is unclear, make a reasonable assumption and state it, or ask one short question.
 - Never invent facts, links, or sources. If you are not sure, say so, and use web search if it is available.
+
+MULTIMODAL ATTACHMENTS & CONTEXT:
+- When images, documents (PDF, DOCX, XLSX, TXT), or audio are attached, carefully analyze their content, data, charts, and text.
+- Ground your answers directly on the attached files, citing specific sections, numbers, tables, or quotes where appropriate.
 
 FORMATTING & TOOLS:
 - Use markdown. Put code in fenced code blocks with the language name.
@@ -31,31 +36,144 @@ export class LLMProvider {
     this.ollamaBaseUrl = config.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
   }
 
-  async streamChat({ messages, model = 'gemini-2.5-flash', extendedThinking = false, webSearch = false, onToken, onReasoning, onToolCall }) {
+  async streamChat({
+    messages,
+    model = 'gemini-flash-lite-latest',
+    extendedThinking = false,
+    webSearch = false,
+    maxTokens = 8192,
+    onToken,
+    onReasoning,
+    onToolCall,
+    onFinishReason,
+  }) {
     if (this.geminiApiKey && (model.includes('gemini') || model.includes('nova') || !this.anthropicApiKey)) {
       try {
-        return await this._streamGemini({ messages, model, extendedThinking, webSearch, onToken, onReasoning, onToolCall });
+        return await this._streamGemini({
+          messages,
+          model,
+          extendedThinking,
+          webSearch,
+          maxTokens,
+          onToken,
+          onReasoning,
+          onToolCall,
+          onFinishReason,
+        });
       } catch (err) {
-        console.warn('Gemini stream failed; falling back to resilient stream engine:', err.message);
+        console.warn('[LLMProvider] Gemini stream failed; falling back to resilient stream engine:', err.message);
       }
     }
 
-    return this._streamMock({ messages, model, extendedThinking, webSearch, onToken, onReasoning, onToolCall });
+    return this._streamMock({
+      messages,
+      model,
+      extendedThinking,
+      webSearch,
+      onToken,
+      onReasoning,
+      onToolCall,
+    });
   }
 
-  async _streamGemini({ messages, model = 'gemini-flash-lite-latest', extendedThinking, webSearch, onToken, onReasoning }) {
+  async _streamGemini({
+    messages,
+    model = 'gemini-flash-lite-latest',
+    extendedThinking,
+    webSearch,
+    maxTokens = 8192,
+    onToken,
+    onReasoning,
+    onFinishReason,
+  }) {
     const candidateModels = [
+      'gemini-2.5-flash',
       'gemini-flash-lite-latest',
       'gemini-3.8-flash',
-      'gemini-3.5-flash',
       'gemini-flash-latest',
-      'gemini-2.5-flash',
     ];
 
-    const contents = messages.map((m) => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }],
-    }));
+    // Build multi-turn contents with full multimodal support
+    const contents = messages.map((m) => {
+      const role = m.role === 'assistant' ? 'model' : 'user';
+      const parts = [];
+
+      // Process attachments if present
+      if (m.attachments && Array.isArray(m.attachments)) {
+        for (const att of m.attachments) {
+          const mimeType = (att.mimeType || '').toLowerCase();
+
+          // 1. Images (PNG, JPEG, WEBP, GIF)
+          if (mimeType.startsWith('image/') && att.base64) {
+            const cleanBase64 = att.base64.replace(/^data:[^;]+;base64,/, '');
+            parts.push({
+              inlineData: {
+                mimeType: mimeType.split(';')[0],
+                data: cleanBase64,
+              },
+            });
+          }
+          // 2. Audio (MP3, WAV, WEBM, OGG, M4A)
+          else if (mimeType.startsWith('audio/')) {
+            if (att.base64) {
+              const cleanBase64 = att.base64.replace(/^data:[^;]+;base64,/, '');
+              parts.push({
+                inlineData: {
+                  mimeType: mimeType.split(';')[0],
+                  data: cleanBase64,
+                },
+              });
+            }
+            if (att.transcript) {
+              parts.push({
+                text: `[Attached Audio / Voice Recording: "${att.name}"]\nTranscript of spoken words:\n${att.transcript}`,
+              });
+            }
+          }
+          // 3. Documents with extracted text (PDF, DOCX, XLSX, TXT)
+          else if (att.extractedText) {
+            parts.push({
+              text: `[Attached Document: "${att.name}"]:\n${att.extractedText}`,
+            });
+          }
+          // 4. Scanned PDF or raw PDF buffer for Gemini native PDF reading
+          else if (mimeType === 'application/pdf' && att.base64) {
+            const cleanBase64 = att.base64.replace(/^data:[^;]+;base64,/, '');
+            parts.push({
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: cleanBase64,
+              },
+            });
+          }
+        }
+      }
+
+      // Add user message text or smart default
+      const textContent = (m.content || '').trim();
+      if (textContent) {
+        parts.push({ text: textContent });
+      } else if (parts.length > 0 && role === 'user') {
+        // Helpful automatic prompt when attachments provided with no explicit text
+        const hasDoc = m.attachments?.some((a) => a.mimeType?.includes('pdf') || a.extractedText);
+        const hasImg = m.attachments?.some((a) => a.mimeType?.startsWith('image/'));
+        const hasAudio = m.attachments?.some((a) => a.mimeType?.startsWith('audio/'));
+
+        let promptFallback = 'Please analyze the attached content and provide a detailed overview with key findings.';
+        if (hasDoc) {
+          promptFallback = 'Please thoroughly read this attached document and provide a complete summary with main points, key data, and conclusions.';
+        } else if (hasImg) {
+          promptFallback = 'Please thoroughly inspect and describe this image, highlighting any notable details, text, and visual elements.';
+        } else if (hasAudio) {
+          promptFallback = 'Please transcribe and summarize the key ideas spoken in this audio recording.';
+        }
+        parts.push({ text: promptFallback });
+      } else if (parts.length === 0) {
+        parts.push({ text: 'Hello' });
+      }
+
+      return { role, parts };
+    });
 
     if (extendedThinking && onReasoning) {
       onReasoning('NOVA Extended Thinking: Synthesizing contextual requirements, checking tools, and structuring multi-turn answer...');
@@ -66,7 +184,22 @@ export class LLMProvider {
       systemInstruction: {
         parts: [{ text: NOVA_SYSTEM_PROMPT }],
       },
+      generationConfig: {
+        maxOutputTokens: Math.max(4096, maxTokens || 8192),
+        temperature: 0.7,
+      },
     };
+
+    // Log payload structure (safely without raw base64) for verification
+    const safeSummary = contents.map((c) => ({
+      role: c.role,
+      parts: c.parts.map((p) =>
+        p.inlineData
+          ? `[inlineData: ${p.inlineData.mimeType}, size: ${Math.round(p.inlineData.data.length / 1024)} KB]`
+          : `[text: ${p.text?.slice(0, 60)}...]`
+      ),
+    }));
+    console.log('[LLMProvider] Final Payload Structure:', JSON.stringify(safeSummary, null, 2));
 
     let lastError = null;
     for (const geminiModel of candidateModels) {
@@ -76,11 +209,12 @@ export class LLMProvider {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(12000),
         });
 
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
-          console.warn(`Model ${geminiModel} failed (${response.status}):`, errData.error?.message || response.statusText);
+          console.warn(`[LLMProvider] Model ${geminiModel} failed (${response.status}):`, errData.error?.message || response.statusText);
           lastError = new Error(`Gemini API ${geminiModel} returned status ${response.status}`);
           continue;
         }
@@ -89,41 +223,62 @@ export class LLMProvider {
         const decoder = new TextDecoder();
         let accumulated = '';
         let buffer = '';
+        let finishReasonDetected = null;
+
+        const parseLine = (line) => {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === 'data: [DONE]') return;
+          if (trimmed.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(trimmed.slice(6));
+              const candidate = data.candidates?.[0];
+              const text = candidate?.content?.parts?.[0]?.text;
+              if (text) {
+                accumulated += text;
+                onToken(text);
+              }
+              if (candidate?.finishReason) {
+                finishReasonDetected = candidate.finishReason;
+                if (['MAX_TOKENS', 'LENGTH', 'length'].includes(candidate.finishReason)) {
+                  console.log(`[LLMProvider] Model reached finishReason: ${candidate.finishReason}`);
+                  if (onFinishReason) onFinishReason(candidate.finishReason);
+                }
+              }
+            } catch {
+              // Wait for next buffer chunk
+            }
+          }
+        };
 
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            // Flush remaining buffer at stream end
+            if (buffer.trim()) {
+              parseLine(buffer);
+              buffer = '';
+            }
+            break;
+          }
 
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
 
           for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                const candidate = data.candidates?.[0];
-                const text = candidate?.content?.parts?.[0]?.text;
-                if (text) {
-                  accumulated += text;
-                  onToken(text);
-                }
-              } catch {
-                // keep parsing
-              }
-            }
+            parseLine(line);
           }
         }
 
         if (accumulated.trim()) {
-          return { content: accumulated };
+          return { content: accumulated, finishReason: finishReasonDetected };
         }
       } catch (err) {
         lastError = err;
       }
     }
 
-    throw lastError || new Error('All Gemini candidate models failed');
+    throw lastError || new Error('All Gemini candidate models failed to produce a response');
   }
 
   async _streamMock({ messages, model, extendedThinking, webSearch, onToken, onReasoning, onToolCall }) {

@@ -8,6 +8,7 @@ import {
 } from '../lib/storage';
 import { generateId } from '../lib/utils';
 import { sendChatMessage } from '../lib/api';
+import { useSettingsStore } from './useSettingsStore';
 
 export interface ToastItem {
   id: string;
@@ -53,6 +54,8 @@ interface ChatState {
 
   sendMessage: (text: string, customAttachments?: Attachment[]) => Promise<void>;
   stopStreaming: () => void;
+  continueGenerating: (assistantMessageId: string) => Promise<void>;
+  retryMessage: (assistantMessageId: string) => Promise<void>;
   regenerateMessage: (assistantMessageId: string) => Promise<void>;
   editUserMessage: (userMessageId: string, newContent: string) => Promise<void>;
   setMessageFeedback: (messageId: string, feedback: 'up' | 'down') => void;
@@ -316,6 +319,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
       const activeConv = currentConvs.find((c) => c.id === targetConvId);
       const history = activeConv?.messages.slice(0, -1) || [];
+      const userMaxTokens = useSettingsStore.getState().settings.maxTokens || 8192;
 
       try {
         const result = await sendChatMessage({
@@ -323,6 +327,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           history,
           attachments: attachmentsToSend,
           model: selectedModel,
+          maxTokens: userMaxTokens,
           extendedThinking: extendedThinkingActive,
           webSearch: webSearchActive,
           signal: controller.signal,
@@ -344,6 +349,7 @@ export const useChatStore = create<ChatState>((set, get) => {
                       ...m,
                       content: result.content,
                       reasoning: result.reasoning,
+                      finishReason: result.finishReason,
                       isStreaming: false,
                     }
                   : m
@@ -396,7 +402,8 @@ export const useChatStore = create<ChatState>((set, get) => {
             };
           });
         } else {
-          // Set error message
+          // Set error message with retryable flag
+          const partialText = get().currentStreamingText;
           set((state) => {
             const updatedConvs = state.conversations.map((conv) => {
               if (conv.id === targetConvId) {
@@ -404,8 +411,8 @@ export const useChatStore = create<ChatState>((set, get) => {
                   m.id === assistantMessageId
                     ? {
                         ...m,
-                        content: 'I apologize, but an unexpected error occurred while processing your request.',
-                        error: err.message,
+                        content: partialText || '',
+                        error: err.message || 'Generation failed',
                         isStreaming: false,
                       }
                     : m
@@ -424,9 +431,89 @@ export const useChatStore = create<ChatState>((set, get) => {
               abortController: null,
             };
           });
-          get().addToast('Error generating response', 'error');
+          get().addToast(`Error: ${err.message}`, 'error');
         }
       }
+    },
+
+    continueGenerating: async (assistantMessageId: string) => {
+      const { conversations, activeConversationId, selectedModel, isStreaming } = get();
+      if (isStreaming || !activeConversationId) return;
+
+      const conv = conversations.find((c) => c.id === activeConversationId);
+      if (!conv) return;
+
+      const msgIdx = conv.messages.findIndex((m) => m.id === assistantMessageId);
+      if (msgIdx === -1) return;
+
+      const targetMsg = conv.messages[msgIdx];
+      const previousContent = targetMsg.content;
+      const history = conv.messages.slice(0, msgIdx);
+      const controller = new AbortController();
+      const userMaxTokens = useSettingsStore.getState().settings.maxTokens || 8192;
+
+      set({
+        isStreaming: true,
+        streamingMessageId: assistantMessageId,
+        currentStreamingText: previousContent,
+        abortController: controller,
+      });
+
+      try {
+        const result = await sendChatMessage({
+          prompt: 'Continue generating exactly from where you left off. Do not repeat what was already written.',
+          history: [
+            ...history,
+            { role: 'assistant', content: previousContent } as Message,
+          ],
+          model: selectedModel,
+          maxTokens: userMaxTokens,
+          signal: controller.signal,
+          onChunk: (chunk: string) => {
+            set({ currentStreamingText: previousContent + chunk });
+          },
+        });
+
+        const fullContent = previousContent + (result.content || '');
+        set((state) => {
+          const updatedConvs = state.conversations.map((c) => {
+            if (c.id === activeConversationId) {
+              const updatedMessages = c.messages.map((m) =>
+                m.id === assistantMessageId
+                  ? {
+                      ...m,
+                      content: fullContent,
+                      finishReason: result.finishReason,
+                      isStreaming: false,
+                    }
+                  : m
+              );
+              return { ...c, messages: updatedMessages, updatedAt: Date.now() };
+            }
+            return c;
+          });
+          saveConversations(updatedConvs);
+          return {
+            conversations: updatedConvs,
+            isStreaming: false,
+            streamingMessageId: null,
+            currentStreamingText: '',
+            abortController: null,
+          };
+        });
+      } catch (err: any) {
+        set({
+          isStreaming: false,
+          streamingMessageId: null,
+          currentStreamingText: '',
+          abortController: null,
+        });
+        get().addToast(`Could not continue: ${err.message}`, 'error');
+      }
+    },
+
+    retryMessage: async (assistantMessageId: string) => {
+      return get().regenerateMessage(assistantMessageId);
     },
 
     regenerateMessage: async (assistantMessageId: string) => {
